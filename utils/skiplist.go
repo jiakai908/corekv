@@ -1,9 +1,11 @@
 package utils
 
 import (
+	"bytes"
 	"github.com/hardcore-os/corekv/utils/codec"
 	"math/rand"
 	"sync"
+	"time"
 )
 
 const (
@@ -23,8 +25,18 @@ type SkipList struct {
 
 func NewSkipList() *SkipList {
 	//implement me here!!!
+	source := rand.NewSource(time.Now().UnixNano())
 
-	return nil
+	return &SkipList{
+		header: &Element{
+			levels: make([]*Element, defaultMaxLevel),
+			entry:  nil,
+			score:  0,
+		},
+		rand:     rand.New(source),
+		maxLevel: defaultMaxLevel,
+		length:   0,
+	}
 }
 
 type Element struct {
@@ -46,13 +58,90 @@ func (elem *Element) Entry() *codec.Entry {
 }
 
 func (list *SkipList) Add(data *codec.Entry) error {
-	//implement me here!!!
+	list.lock.Lock()
+	defer list.lock.Unlock()
+	score := list.calcScore(data.Key)
+	var elem *Element
+
+	max := len(list.header.levels)
+	prevElem := list.header
+
+	var prevElemHeaders [defaultMaxLevel]*Element
+
+	for i := max - 1; i >= 0; {
+		//keep visit path here
+		prevElemHeaders[i] = prevElem
+
+		for next := prevElem.levels[i]; next != nil; next = prevElem.levels[i] {
+			if comp := list.compare(score, data.Key, next); comp <= 0 {
+				if comp == 0 {
+					elem = next
+					elem.entry = data
+					list.size += elem.Entry().Size() - data.Size()
+					return nil
+				}
+
+				//find the insert position
+				break
+			}
+
+			//just like linked-list next
+			prevElem = next
+			prevElemHeaders[i] = prevElem
+		}
+
+		topLevel := prevElem.levels[i]
+
+		//to skip same prevHeader's next and fill next elem into temp element
+		for i--; i >= 0 && prevElem.levels[i] == topLevel; i-- {
+			prevElemHeaders[i] = prevElem
+		}
+	}
+
+	level := list.randLevel()
+
+	elem = newElement(score, data, level)
+	//to add elem to the skiplist
+	for i := 0; i < level; i++ {
+		elem.levels[i] = prevElemHeaders[i].levels[i]
+		prevElemHeaders[i].levels[i] = elem
+	}
+	list.size += data.Size()
+	list.length++
 	return nil
 }
 
 func (list *SkipList) Search(key []byte) (e *codec.Entry) {
-	//implement me here!!!
-	return nil
+	list.lock.RLock()
+	defer list.lock.RUnlock()
+	if list.length == 0 {
+		return nil
+	}
+
+	score := list.calcScore(key)
+
+	prevElem := list.header
+	i := len(list.header.levels) - 1
+
+	for i >= 0 {
+		for next := prevElem.levels[i]; next != nil; next = prevElem.levels[i] {
+			if comp := list.compare(score, key, next); comp <= 0 {
+				if comp == 0 {
+					return next.Entry()
+				}
+				break
+			}
+
+			prevElem = next
+		}
+
+		topLevel := prevElem.levels[i]
+
+		for i--; i >= 0 && prevElem.levels[i] == topLevel; i-- {
+
+		}
+	}
+	return
 }
 
 func (list *SkipList) Close() error {
@@ -78,15 +167,32 @@ func (list *SkipList) calcScore(key []byte) (score float64) {
 
 func (list *SkipList) compare(score float64, key []byte, next *Element) int {
 	//implement me here!!!
-	return 0
+	if score == next.score {
+		return bytes.Compare(key, next.entry.Key)
+	}
+
+	if score < next.score {
+		return -1
+	} else {
+		return 1
+	}
 }
 
 func (list *SkipList) randLevel() int {
 	//implement me here!!!
-	return 0
+	if list.maxLevel <= 1 {
+		return 1
+	}
+	i := 1
+	for ; i < list.maxLevel; i++ {
+		if RandN(1000)%2 == 0 {
+			return i
+		}
+	}
+	return i
 }
 
 func (list *SkipList) Size() int64 {
 	//implement me here!!!
-	return 0
+	return list.size
 }

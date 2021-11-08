@@ -23,6 +23,7 @@ type SkipList struct {
 
 func NewSkipList() *SkipList {
 	//implement me here!!!
+
 	return nil
 }
 

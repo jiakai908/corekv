@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hardcore-os/corekv/file"
+	"github.com/hardcore-os/corekv/iterator"
 	"github.com/hardcore-os/corekv/utils"
 	"github.com/hardcore-os/corekv/utils/codec"
 )
@@ -178,7 +180,30 @@ func (lm *levelManager) build() error {
 }
 
 // 向L0层flush一个sstable
-func (lm *levelManager) flush(immutable *memTable) error {
+func (lm *levelManager) flush(immutable *memTable) (err error) {
 	// TODO LAB
+	// 分配一个fid
+	nextID := atomic.AddUint64(&lm.maxFid, 1)
+	sstName := utils.FileNameSSTable(lm.opt.WorkDir, nextID)
+
+	// 构建一个 builder
+	builder := newTableBuilder(lm.opt)
+	iter := immutable.sl.NewIterator(&iterator.Options{})
+	for iter.Rewind(); iter.Valid(); iter.Next() {
+		entry := iter.Item().Entry()
+		builder.add(entry)
+	}
+	// 创建一个table对象
+	table := openTable(lm, sstName, builder)
+	// 更新manifest文件
+	lm.levels[0].add(table)
+	err = lm.manifestFile.AddTableMeta(0, &file.TableMeta{
+		ID: nextID,
+		Checksum: []byte{'j', 'a', 'c', 'k'},
+	})
+	// manifest写入失败直接panic
+	utils.CondPanic(err != nil, err)
+	// 只有完全正确的flush了文件，才能关闭immutable，保证wal文件的存在，才能恢复数据
+	immutable.close()
 	return nil
 }

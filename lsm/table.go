@@ -162,7 +162,6 @@ func (it *tableIterator) seekHelper(blockIdx int, key []byte) {
 	it.it = it.bi.Item()
 }
 
-
 func (t *table) offsets(ko *pb.BlockOffset, i int) bool {
 	index := t.ss.Indexs()
 	if i < 0 || i > len(index.GetOffsets()) {

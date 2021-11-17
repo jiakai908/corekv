@@ -198,7 +198,7 @@ func (lm *levelManager) flush(immutable *memTable) (err error) {
 	// 更新manifest文件
 	lm.levels[0].add(table)
 	err = lm.manifestFile.AddTableMeta(0, &file.TableMeta{
-		ID: nextID,
+		ID:       nextID,
 		Checksum: []byte{'j', 'a', 'c', 'k'},
 	})
 	// manifest写入失败直接panic

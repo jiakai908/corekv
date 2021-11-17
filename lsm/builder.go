@@ -307,8 +307,8 @@ type blockIterator struct {
 	blockID int
 
 	preOverlap uint16
-	
-	it         iterator.Item
+
+	it iterator.Item
 }
 
 func (itr *blockIterator) setBlock(b *block) {
@@ -347,5 +347,5 @@ func (itr *blockIterator) setIdx(i int) {
 	}
 	itr.err = nil
 	startOffset := int(itr.entryOffsets[i])
-	
+
 }

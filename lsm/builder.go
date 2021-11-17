@@ -14,6 +14,7 @@
 package lsm
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -348,4 +349,71 @@ func (itr *blockIterator) setIdx(i int) {
 	itr.err = nil
 	startOffset := int(itr.entryOffsets[i])
 
+	// Set base key
+	if len(itr.baseKey) == 0 {
+		var baseHeader header
+		baseHeader.decode(itr.data)
+		itr.baseKey = itr.data[headerSize : headerSize+baseHeader.diff]
+	}
+
+	var endOffset int
+	// idx points to the last entry in the block
+	if itr.idx+1 == len(itr.entryOffsets) {
+		endOffset = len(itr.data)
+	} else {
+		// idx point to some entry other than the last one in the block
+		// EndOffset of the current entry is the start offset of the next entry.
+		endOffset = int(itr.entryOffsets[itr.idx+1])
+	}
+	defer func ()  {
+		if r := recover(); r != nil {
+			var debugBuf bytes.Buffer
+			fmt.Fprintf(&debugBuf, "==== Recovered====\n")
+			fmt.Fprintf(&debugBuf, "Table ID: %d\nBlock ID: %d\nEntry Idx: %d\nData len: %d\n"+
+				"StartOffset: %d\nEndOffset: %d\nEntryOffsets len: %d\nEntryOffsets: %v\n",
+				itr.tableID, itr.blockID, itr.idx, len(itr.data), startOffset, endOffset,
+				len(itr.entryOffsets), itr.entryOffsets)
+			panic(debugBuf.String())
+		}
+	}()
+
+	entryData := itr.data[startOffset:endOffset]
+	var h header
+	h.decode(entryData)
+	if h.overlap > itr.preOverlap {
+		itr.key = append(itr.key[:itr.preOverlap], itr.baseKey[itr.preOverlap:h.overlap]...)
+	}
+
+	itr.preOverlap = h.overlap
+	valueOff := headerSize + h.diff
+	diffKey := entryData[headerSize:valueOff]
+	itr.key = append(itr.key[:h.overlap], diffKey...)
+	e := codec.NewEntry(itr.key, nil)
+	e.DecodeEntry(entryData[valueOff:])
+	itr.it = &Item{e: e}
+}
+
+func (itr *blockIterator) Error() error {
+	return itr.err
+}
+
+func (itr *blockIterator) Next() {
+	itr.setIdx(itr.idx + 1)
+}
+
+func (itr *blockIterator) Valid() bool {
+	return itr.it == nil
+}
+
+func (itr *blockIterator) Rewind() bool {
+	itr.setIdx(0)
+	return true
+}
+
+func (itr *blockIterator) Item() iterator.Item {
+	return itr.it
+}
+
+func (itr *blockIterator) Close() error {
+	return nil
 }

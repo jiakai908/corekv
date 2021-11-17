@@ -340,7 +340,6 @@ func (itr *blockIterator) seek(key []byte) {
 	itr.setIdx(foundEntryIdx)
 }
 
-// set idx
 func (itr *blockIterator) setIdx(i int) {
 	itr.idx = i
 	if i > len(itr.entryOffsets) || i < 0 {

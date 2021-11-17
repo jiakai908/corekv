@@ -340,6 +340,7 @@ func (itr *blockIterator) seek(key []byte) {
 	itr.setIdx(foundEntryIdx)
 }
 
+// set idx
 func (itr *blockIterator) setIdx(i int) {
 	itr.idx = i
 	if i > len(itr.entryOffsets) || i < 0 {
@@ -365,7 +366,7 @@ func (itr *blockIterator) setIdx(i int) {
 		// EndOffset of the current entry is the start offset of the next entry.
 		endOffset = int(itr.entryOffsets[itr.idx+1])
 	}
-	defer func ()  {
+	defer func() {
 		if r := recover(); r != nil {
 			var debugBuf bytes.Buffer
 			fmt.Fprintf(&debugBuf, "==== Recovered====\n")

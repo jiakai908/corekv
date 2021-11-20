@@ -15,8 +15,10 @@
 package lsm
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/hardcore-os/corekv/utils"
 	"github.com/hardcore-os/corekv/utils/codec"
 	"github.com/hardcore-os/corekv/utils/codec/pb"
+	"github.com/pkg/errors"
 )
 
 // TODO LAB 这里实现 table
@@ -82,6 +85,81 @@ func (t *table) Search(key []byte, maxVs *uint64) (entry *codec.Entry, err error
 
 	return nil, utils.ErrKeyNotFound
 
+}
+
+// 去加载sst对应的block
+func (t *table) block(idx int) (*block, error) {
+	utils.CondPanic(idx < 0, fmt.Errorf("idx=%d", idx))
+	if idx > len(t.ss.Indexs().Offsets) {
+		return nil, errors.New("block out of index")
+	}
+	var b *block
+	key := t.blockCacheKey(idx)
+	blk, ok := t.lm.cache.blocks.Get(key)
+	if ok && blk != nil {
+		b, _ = blk.(*block)
+		return b, nil
+	}
+
+	var ko pb.BlockOffset
+	utils.CondPanic(!t.offsets(&ko, idx), fmt.Errorf("block t.offset id=%d", idx))
+	b = &block{
+		offset: int(ko.GetOffset()),
+	}
+
+	var err error
+	if b.data, err = t.read(b.offset, int(ko.GetLen())); err != nil {
+		return nil, errors.Wrapf(err,
+			"failed to read from sstable: %d at offset: %d, len: %d",
+			t.ss.FID(), b.offset, ko.GetLen())
+	}
+
+	readPos := len(b.data) - 4 // First read checksum length
+	b.chkLen = int(codec.BytesToU32(b.data[readPos : readPos+4]))
+
+	if b.chkLen > len(b.data) {
+		return nil, errors.New("invalid checksum length. Either the data is " +
+			"corrupted or the table options are incorrectly set")
+	}
+
+	readPos -= b.chkLen
+	b.checksum = b.data[readPos : readPos+b.chkLen]
+
+	readPos -= 4
+	numEntries := int(codec.BytesToU32(b.data[readPos : readPos+4]))
+	entriesIndexStart := readPos - (numEntries * 4)
+	entriesIndexEnd := entriesIndexStart + numEntries*4
+
+	b.entryOffsets = codec.BytesToU32Slice(b.data[entriesIndexStart:entriesIndexEnd])
+
+	b.entriesIndexStart = entriesIndexStart
+
+	b.data = b.data[:readPos+4]
+
+	if err = b.verifyCheckSum(); err != nil {
+		return nil, err
+	}
+
+	t.lm.cache.blocks.Set(key, b)
+
+	return b, nil
+
+}
+
+func (t *table) read(off, sz int) ([]byte, error) {
+	return t.ss.Bytes(off, sz)
+}
+
+// blockCacheKey is used to store blocks into the block cache.
+func (t *table) blockCacheKey(idx int) []byte {
+	utils.CondPanic(t.fid >= math.MaxUint32, fmt.Errorf("t.fid >= math.MaxUint32"))
+	utils.CondPanic(uint32(idx) >= math.MaxUint32, fmt.Errorf("uint32(idx) >= math.MaxUin32"))
+
+	buf := make([]byte, 8)
+	// Assume t.ID does not overflow uint32
+	binary.BigEndian.PutUint32(buf[:4], uint32(t.fid))
+	binary.BigEndian.PutUint32(buf[4:], uint32(idx))
+	return buf
 }
 
 type tableIterator struct {

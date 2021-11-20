@@ -63,7 +63,7 @@ func (lh *levelHandler) Sort() {
 func (lh *levelHandler) searchL0SST(key []byte) (*codec.Entry, error) {
 	var version uint64
 	for _, table := range lh.tables {
-		if entry, err := table.Serach(key, &version); err == nil {
+		if entry, err := table.Search(key, &version); err == nil {
 			return entry, nil
 		}
 	}
@@ -75,7 +75,7 @@ func (lh *levelHandler) searchLNSST(key []byte) (*codec.Entry, error) {
 	if table == nil {
 		return nil, utils.ErrKeyNotFound
 	}
-	if entry, err := table.Serach(key, &version); err == nil {
+	if entry, err := table.Search(key, &version); err == nil {
 		return entry, nil
 	}
 	return nil, utils.ErrKeyNotFound

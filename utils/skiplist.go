@@ -2,17 +2,32 @@ package utils
 
 import (
 	"bytes"
+	"github.com/hardcore-os/corekv/fastrand"
+	"math"
 	"sync"
+	"sync/atomic"
 )
 
 const (
 	defaultMaxLevel = 20
+	pValue          = 1 / math.E
 )
 
+var (
+	probabilities [defaultMaxLevel]uint32
+)
+
+func init() {
+	p := float64(1.0)
+	for i := 0; i < defaultMaxLevel; i++ {
+		probabilities[i] = uint32(float64(math.MaxUint32) * p)
+		p *= pValue
+	}
+}
+
 type SkipList struct {
-	maxLevel   int          //sl的最大高度
 	lock       sync.RWMutex //读写锁，用来实现并发安全的sl
-	currHeight int32        //sl当前的最大高度
+	currHeight uint32       //sl当前的最大高度
 	headOffset uint32       //头结点在arena当中的偏移量
 	arena      *Arena
 }
@@ -74,8 +89,117 @@ func (e *Element) key(arena *Arena) []byte {
 	return arena.getKey(e.keyOffset, e.keySize)
 }
 
+func (e *Element) getValueOffset() (uint32, uint32) {
+	value := atomic.LoadUint64(&e.value)
+	return decodeValue(value)
+
+}
+
 func (list *SkipList) Size() int64 {
 	return list.arena.Size()
+}
+
+func (list *SkipList) getHeight() uint32 {
+	return atomic.LoadUint32(&list.currHeight)
+}
+
+func (list *SkipList) findSpliceForLevel(score float64, key []byte, before uint32, level int) (uint32, uint32) {
+	for {
+		// Assume before.key < key.
+		beforeNode := list.arena.getElement(before)
+		next := beforeNode.getNextOffset(level)
+		nextNode := list.arena.getElement(next)
+
+		if nextNode == nil {
+			return before, next
+		}
+
+		cmp := list.compare(score, key, nextNode)
+
+		if cmp == 0 {
+			// Equality case.
+			return next, next
+		}
+		if cmp < 0 {
+			// before.key < key < next.key. We are done for this level.
+			return before, next
+		}
+		before = next // Keep moving right on this level.
+	}
+}
+
+// findNear finds the node near to key.
+// If less=true, it finds rightmost node such that node.key < key (if allowEqual=false) or
+// node.key <= key (if allowEqual=true).
+// If less=false, it finds leftmost node such that node.key > key (if allowEqual=false) or
+// node.key >= key (if allowEqual=true).
+// Returns the node found. The bool returned is true if the node has key equal to given key.
+func (list *SkipList) findNear(score float64, key []byte, less bool, allowEqual bool) (*Element, bool) {
+	x := list.getHead()
+	level := int(list.getHeight() - 1)
+	for {
+		// Assume x.key < key
+		next := list.getNext(x, level)
+		if next == nil {
+			// x.key < key < next.key
+			if level > 0 {
+				// can descend further to iterate closer to the end.
+				level--
+				continue
+			}
+			// level == 0. cannot descend further. Let's return something that makes sense.
+			if !less {
+				return nil, false
+			}
+			// try to return x. Make sure it is not a head node.
+			if x == list.getHead() {
+				return nil, false
+			}
+			return x, false
+		}
+
+		cmp := list.compare(score, key, next)
+		if cmp > 0 {
+			// x.key < next.key < key . we can continue to move right.
+			x = next
+			continue
+		}
+		if cmp == 0 {
+			// x.key < key == next.key
+			if allowEqual == true {
+				return next, true
+			}
+			if !less {
+				// we want >, so go to base level to grab the next bigger note.
+				return list.getNext(next, 0), false
+			}
+
+			// we want <. If not base level, we should go closer in the next level.
+			if level > 0 {
+				level--
+				continue
+			}
+			// on base level. Return x.
+			if x == list.getHead() {
+				return nil, false
+			}
+			return x, false
+		}
+		// cmp < 0. In other words, x.key < key < next
+		if level > 0 {
+			level--
+			continue
+		}
+		// at base level. need to return something.
+		if !less {
+			return next, false
+		}
+		// try to return x. make sure it is not a head node.
+		if x == list.getHead() {
+			return nil, false
+		}
+		return x, false
+	}
 }
 
 func (list *SkipList) Add(data *Entry) error {
@@ -88,50 +212,49 @@ func (list *SkipList) Add(data *Entry) error {
 	}
 
 	//从当前最大高度开始
-	max := list.currHeight
-	//拿到头节点，从第一个开始
-	prevElem := list.arena.getElement(list.headOffset)
+	listHeight := list.getHeight()
+
 	//用来记录访问路径
-	var prevElemHeaders [defaultMaxLevel]*Element
+	var prev [defaultMaxLevel + 1]uint32
+	var next [defaultMaxLevel + 1]uint32
+	prev[listHeight] = list.headOffset
 
-	for i := max - 1; i >= 0; {
-		//keep visit path here
-		prevElemHeaders[i] = prevElem
+	for i := int(listHeight) - 1; i >= 0; i-- {
 
-		for next := list.getNext(prevElem, int(i)); next != nil; next = list.getNext(prevElem, int(i)) {
-			if comp := list.compare(score, data.Key, next); comp <= 0 {
-				if comp == 0 {
-					vo := list.arena.putVal(value)
-					encV := encodeValue(vo, value.EncodedSize())
-					next.value = encV
-					return nil
-				}
+		prev[i], next[i] = list.findSpliceForLevel(score, data.Key, prev[i+1], i)
 
-				//find the insert position
-				break
-			}
-
-			//just like linked-list next
-			prevElem = next
-			prevElemHeaders[i] = prevElem
-		}
-
-		topLevel := prevElem.levels[i]
-
-		//to skip same prevHeader's next and fill next elem into temp element
-		for i--; i >= 0 && prevElem.levels[i] == topLevel; i-- {
-			prevElemHeaders[i] = prevElem
+		if prev[i] == next[i] {
+			vo := list.arena.putVal(value)
+			encV := encodeValue(vo, value.EncodedSize())
+			prevNode := list.arena.getElement(prev[i])
+			prevNode.value = encV
+			return nil
 		}
 	}
 
-	level := list.randLevel()
+	//level := list.randLevel()
+	level := list.randomHeight()
 
-	elem = newElement(list.arena, data.Key, ValueStruct{Value: data.Value}, level)
+	if level > listHeight {
+		list.currHeight = level
+	}
+
+	elem = newElement(list.arena, data.Key, ValueStruct{Value: data.Value}, int(level))
 	//to add elem to the skiplist
 	off := list.arena.getElementOffset(elem)
-	for i := 0; i < level; i++ {
-		elem.levels[i] = prevElemHeaders[i].levels[i]
-		prevElemHeaders[i].levels[i] = off
+	for i := 0; i < int(level); i++ {
+		if list.arena.getElement(prev[i]) == nil {
+			AssertTrue(i > 1) // This cannot happen in base level.
+			// We haven't computed prev, next for this level because height exceeds old listHeight.
+			// For these levels, we expect the lists to be sparse, so we can just search from head.
+			prev[i], next[i] = list.findSpliceForLevel(score, data.Key, list.headOffset, i)
+			// Someone adds the exact same key before we are able to do so. This can only happen on
+			// the base level. But we know we are not on the base level.
+			AssertTrue(prev[i] != next[i])
+		}
+		elem.levels[i] = next[i]
+		pnode := list.arena.getElement(prev[i])
+		pnode.levels[i] = off
 	}
 
 	return nil
@@ -140,35 +263,20 @@ func (list *SkipList) Add(data *Entry) error {
 func (list *SkipList) Search(key []byte) (e *Entry) {
 	list.lock.RLock()
 	defer list.lock.RUnlock()
-	if list.arena.Size() == 0 {
+	score := calcScore(key)
+	n, _ := list.findNear(score, key, false, true)
+	if n == nil {
 		return nil
 	}
 
-	score := calcScore(key)
-
-	prevElem := list.arena.getElement(list.headOffset)
-	i := list.currHeight
-
-	for i >= 0 {
-		for next := list.getNext(prevElem, int(i)); next != nil; next = list.getNext(prevElem, int(i)) {
-			if comp := list.compare(score, key, next); comp <= 0 {
-				if comp == 0 {
-					vo, vSize := decodeValue(next.value)
-					return &Entry{Key: key, Value: list.arena.getVal(vo, vSize).Value}
-				}
-				break
-			}
-
-			prevElem = next
-		}
-
-		topLevel := prevElem.levels[i]
-
-		for i--; i >= 0 && prevElem.levels[i] == topLevel; i-- {
-
-		}
+	nextKey := list.arena.getKey(n.keyOffset, n.keySize)
+	if !SameKey(key, nextKey) {
+		return nil
 	}
-	return
+
+	valOffset, valSize := n.getValueOffset()
+	return &Entry{Key: key, Value: list.arena.getVal(valOffset, valSize).Value}
+
 }
 
 func (list *SkipList) Close() error {
@@ -204,23 +312,36 @@ func (list *SkipList) compare(score float64, key []byte, next *Element) int {
 	}
 }
 
-func (list *SkipList) randLevel() int {
-	if list.maxLevel <= 1 {
-		return 1
+func (s *SkipList) randomHeight() uint32 {
+	rnd := fastrand.Uint32()
+	h := uint32(1)
+	for h < defaultMaxLevel && rnd <= probabilities[h] {
+		h++
 	}
-	i := 1
-	for ; i < list.maxLevel; i++ {
-		if RandN(1000)%2 == 0 {
-			return i
-		}
-	}
-	return i
+	return h
 }
+
+//func (list *SkipList) randLevel() int {
+//	if list.maxLevel <= 1 {
+//		return 1
+//	}
+//	i := 1
+//	for ; i < list.maxLevel; i++ {
+//		if RandN(1000)%2 == 0 {
+//			return i
+//		}
+//	}
+//	return i
+//}
 
 //拿到某个节点，在某个高度上的next节点
 //如果该节点已经是该层最后一个节点（该节点的level[height]将是0），会返回nil
 func (list *SkipList) getNext(e *Element, height int) *Element {
 	return list.arena.getElement(e.getNextOffset(height))
+}
+
+func (list *SkipList) getHead() *Element {
+	return list.arena.getElement(list.headOffset)
 }
 
 type SkipListIter struct {
